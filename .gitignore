@@ -1,3 +1,4 @@
 offline/data
+offline/notebooks/__pycache__
 *.pkl
 !online/models/model_latest.pkl

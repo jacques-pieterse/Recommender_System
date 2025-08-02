@@ -5,7 +5,6 @@ import random
 import pickle
 import numpy as np
 
-# Constants
 TRAIN_RATIO = 0.8
 EXTERNAL_DATA_PATH = "../data/external/"
 EXTERNAL_SAVE_DATA_PATH = "../data/processed/"
@@ -13,7 +12,6 @@ FILE_NAME = "ratings.csv"
 DATA_FOLDER = os.path.join(EXTERNAL_DATA_PATH, "ml-latest-small")
 FILE_PATH = os.path.join(DATA_FOLDER, FILE_NAME)
 SAVE_PATH = os.path.join(EXTERNAL_SAVE_DATA_PATH, "processed_data.npz")
-
 
 def load_ratings_data(file_path):
     """Loads raw ratings data from CSV."""
@@ -29,7 +27,7 @@ def load_ratings_data(file_path):
         print(f"An error occurred: {e}")
         return []
 
-def split_data(raw_data, train_ratio=TRAIN_RATIO):
+def split_data(raw_data, train_ratio=TRAIN_RATIO, min_ratings_per_movie=50):
     """Splits ratings into train/test sets and builds mapping structures."""
     user_to_idx, idx_to_user = {}, {}
     movie_to_idx, idx_to_movie = {}, {}
@@ -39,8 +37,20 @@ def split_data(raw_data, train_ratio=TRAIN_RATIO):
 
     train_count = test_count = 0
 
+    movie_rating_counts = {}
+    for row in raw_data:
+        movie_id = row[1]
+        if movie_id not in movie_rating_counts:
+            movie_rating_counts[movie_id] = 0
+        movie_rating_counts[movie_id] += 1
+    
+    valid_movies = {movie_id for movie_id, count in movie_rating_counts.items() if count >= min_ratings_per_movie}
+
     for row in raw_data:
         user_id, movie_id, rating = row[0], row[1], float(row[2])
+        
+        if movie_id not in valid_movies:
+            continue
 
         if user_id not in user_to_idx:
             user_idx = len(user_to_idx)
@@ -56,13 +66,20 @@ def split_data(raw_data, train_ratio=TRAIN_RATIO):
             movie_ratings_train.append([])
             movie_ratings_test.append([])
 
-        if random.random() < train_ratio:
-            user_ratings_train[user_to_idx[user_id]].append((movie_to_idx[movie_id], rating))
-            movie_ratings_train[movie_to_idx[movie_id]].append((user_to_idx[user_id], rating))
+        user_idx = user_to_idx[user_id]
+        movie_idx = movie_to_idx[movie_id]
+
+        # Only allow test samples if both user and movie were seen in training
+        user_seen_before = len(user_ratings_train[user_idx]) > 0
+        movie_seen_before = len(movie_ratings_train[movie_idx]) > 0
+
+        if not user_seen_before or not movie_seen_before or random.random() < train_ratio:
+            user_ratings_train[user_idx].append((movie_idx, rating))
+            movie_ratings_train[movie_idx].append((user_idx, rating))
             train_count += 1
         else:
-            user_ratings_test[user_to_idx[user_id]].append((movie_to_idx[movie_id], rating))
-            movie_ratings_test[movie_to_idx[movie_id]].append((user_to_idx[user_id], rating))
+            user_ratings_test[user_idx].append((movie_idx, rating))
+            movie_ratings_test[movie_idx].append((user_idx, rating))
             test_count += 1
 
     print(f"Train Count: {train_count}")
@@ -196,6 +213,34 @@ def process_and_save_both_datasets():
     print("All datasets processed and saved.")
     print("Total time:", round(time.time() - start_time, 2), "seconds")
 
-# Optional: Uncomment to run directly
+def filter_by_min_ratings(x, y, r, min_ratings, axis='y'):
+    """
+    Filters flattened data by minimum number of ratings per item.
+
+    Parameters:
+        x (np.ndarray): Array of user or movie indices (e.g., users if axis='y').
+        y (np.ndarray): Array of movie or user indices (e.g., movies if axis='y').
+        r (np.ndarray): Array of ratings.
+        min_ratings (int): Minimum number of ratings required to keep an item.
+        axis (str): 'y' to filter by movie, 'x' to filter by user.
+
+    Returns:
+        filtered_x, filtered_y, filtered_r, valid_ids (np.ndarray): Filtered arrays and valid item indices.
+    """
+    if axis not in ['x', 'y']:
+        raise ValueError("axis must be either 'x' or 'y'")
+
+    item_array = y if axis == 'y' else x
+    item_counts = np.bincount(item_array)
+    valid_ids = np.where(item_counts >= min_ratings)[0]
+    valid_set = set(valid_ids)
+
+    mask = np.isin(item_array, valid_ids)
+    return x[mask], y[mask], r[mask], valid_ids
+
 # if __name__ == "__main__":
+#     # Example usage
 #     process_and_save_both_datasets()
+#     # To load processed data:
+#     # data, mappings = load_processed_data()
+#     # print(data['user_train_x'], mappings['user_to_idx'])
