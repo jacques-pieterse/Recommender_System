@@ -2,17 +2,29 @@ import numpy as np
 import time
 from numba import njit, prange
 
-# --- OPTIMIZED Numba-Accelerated Updates (Parallel) ---
 @njit(parallel=True, cache=True)
 def update_user_embeddings(num_users, user_ptrs, all_m, all_r,
                            user_embeddings, item_embeddings,
                            user_biases, item_biases,
                            lam, gamma, tau_identity):
     """
-    Update user embeddings in parallel using the pre-calculated item embeddings.
+    Update user embeddings and bias in parallel.
+
+    Parameters:
+    - num_users (int): Number of users.
+    - user_ptrs (np.ndarray[int]): Pointer array which points to start and end of each users' ratings.
+    - all_m (np.ndarray[int]): Array of movie indices rated by users.
+    - all_r (np.ndarray[float]): Array of ratings given by users.
+    - user_embeddings (np.ndarray[float]): 2D array (shape: (num_users, embedding_dim)) of current user embeddings.
+    - item_embeddings (np.ndarray[float]): 2D array (shape: (num_items, embedding_dim)) of current item embeddings.
+    - user_biases (np.ndarray[float]): 1D array (shape: (num_users)) of current user biases.
+    - item_biases (np.ndarray[float]): 1D array (shape: (num_items)) of current item biases.
+    - lam (float): Regularization parameter for reward difference.
+    - gamma (float): Regularization parameter for biases.
+    - tau_identity (np.ndarray[float]): Precomputed tau * identity matrix where tau is regularization parameter for embeddings.
     """
-    dim = user_embeddings.shape[1]
-    # This loop now runs in parallel across all available CPU cores
+    # Loop through each user in parallel and update the user's embedding and bias.
+    # Possible as user embeddings and item embeddings are independent of each other.
     for u in prange(num_users):
         start = user_ptrs[u]
         end = user_ptrs[u+1]
@@ -20,7 +32,8 @@ def update_user_embeddings(num_users, user_ptrs, all_m, all_r,
         if n == 0:
             continue
             
-        # Use fancy indexing to grab all necessary data at once
+        # Grab the movies and ratings for this user at once
+        # This avoids repeated indexing and is more efficient
         movies = all_m[start:end]
         ratings = all_r[start:end]
         item_vecs = item_embeddings[movies]
@@ -29,11 +42,12 @@ def update_user_embeddings(num_users, user_ptrs, all_m, all_r,
         # Perform vectorized prediction
         preds = item_vecs @ user_embeddings[u] + item_bias
         
+        # Calculate residuals and update user bias
         residuals = ratings - preds
         user_bias = lam * np.sum(residuals) / (lam * n + gamma)
         user_biases[u] = user_bias
     
-        # Solve for the new embedding
+        # Update user embedding
         adjusted = ratings - user_bias - item_bias
         A = lam * (item_vecs.T @ item_vecs) + tau_identity
         b = lam * (item_vecs.T @ adjusted)
@@ -45,10 +59,23 @@ def update_item_embeddings(num_items, item_ptrs, all_u, all_r,
                            user_biases, item_biases,
                            lam, gamma, tau_identity):
     """
-    Update item embeddings in parallel using the pre-calculated user embeddings.
+    Update item embeddings and bias in parallel.
+
+    Parameters:
+    - num_items (int): Number of items.
+    - item_ptrs (np.ndarray[int]): Pointer array which points to start and end of each item's ratings.
+    - all_u (np.ndarray[int]): Array of user indices who rated items.
+    - all_r (np.ndarray[float]): Array of ratings given by users to items.
+    - user_embeddings (np.ndarray[float]): 2D array (shape: (num_users, embedding_dim)) of current user embeddings.
+    - item_embeddings (np.ndarray[float]): 2D array (shape: (num_items, embedding_dim)) of current item embeddings.
+    - user_biases (np.ndarray[float]): 1D array (shape: (num_users)) of current user biases.
+    - item_biases (np.ndarray[float]): 1D array (shape: (num_items)) of current item biases.
+    - lam (float): Regularization parameter for reward difference.
+    - gamma (float): Regularization parameter for biases.
+    - tau_identity (np.ndarray[float]): Precomputed tau * identity matrix where tau is regularization parameter for embeddings.
     """
-    dim = item_embeddings.shape[1]
-    # This loop also runs in parallel
+    # Loop through each movie in parallel and update the movie's embedding and bias.
+    # Possible as user embeddings and item embeddings are independent of each other.
     for m in prange(num_items):
         start = item_ptrs[m]
         end = item_ptrs[m+1]
@@ -56,36 +83,48 @@ def update_item_embeddings(num_items, item_ptrs, all_u, all_r,
         if n == 0:
             continue
             
-        # Use fancy indexing
+        # Grab the users and ratings for this movie at once
+        # This avoids repeated indexing and is more efficient
         users = all_u[start:end]
         ratings = all_r[start:end]
         user_vecs = user_embeddings[users]
         user_bias = user_biases[users]
         
-        # Vectorized prediction
+        # Perform vectorized prediction
         preds = user_vecs @ item_embeddings[m] + user_bias
         
+        # Calculate residuals and update item bias
         residuals = ratings - preds
         item_bias = lam * np.sum(residuals) / (lam * n + gamma)
         item_biases[m] = item_bias
         
-        # Solve for the new embedding
+        # Update item embedding
         adjusted = ratings - user_bias - item_bias
         A = lam * (user_vecs.T @ user_vecs) + tau_identity
         b = lam * (user_vecs.T @ adjusted)
         item_embeddings[m] = np.linalg.solve(A, b)
 
-# --- OPTIMIZED JIT-compiled evaluation function (Parallel) ---
 @njit(parallel=True, cache=True)
-def calculate_rmse_jit(ptrs, all_user_indices, all_item_indices, all_ratings, 
+def calculate_rmse(ptrs, all_item_indices, all_ratings, 
                        user_embeddings, item_embeddings, user_biases, item_biases):
     """
     Calculates the Root Mean Squared Error in parallel.
-    This function is generic and processes the data from a user-centric view.
+
+    Parameters:
+    - ptrs (np.ndarray[int]): Pointer array which points to start and end of each user's ratings.
+    - all_item_indices (np.ndarray[int]): Array of item indices.
+    - all_ratings (np.ndarray[float]): Array of ratings.
+    - user_embeddings (np.ndarray[float]): 2D array (shape: (num_users, embedding_dim)) of user embeddings.
+    - item_embeddings (np.ndarray[float]): 2D array (shape: (num_items, embedding_dim)) of item embeddings.
+    - user_biases (np.ndarray[float]): 1D array (shape: (num_users)) of user biases.
+    - item_biases (np.ndarray[float]): 1D array (shape: (num_items)) of item biases.
+
+    Returns:
+    - float: The RMSE value.
     """
     total_squared_error = 0.0
     
-    # Loop over all users in parallel
+    # Loop over all users in parallel and calculate the RMSE
     for u in prange(len(ptrs) - 1):
         start, end = ptrs[u], ptrs[u+1]
         if start == end:
@@ -96,26 +135,46 @@ def calculate_rmse_jit(ptrs, all_user_indices, all_item_indices, all_ratings,
         
         # Vectorized prediction for all items rated by this user
         preds = (user_embeddings[u] @ item_embeddings[item_idxs].T) + user_biases[u] + item_biases[item_idxs]
-        
-        # Numba automatically handles thread-safe summation for reduction operations
         total_squared_error += np.sum((actuals - preds) ** 2)
 
     return np.sqrt(total_squared_error / len(all_ratings))
 
-# --- OPTIMIZED Main Training Function ---
-def training_als_from_preprocessed(
-    mu, 
-    num_users, num_items,
-    all_u_train, all_m_train, all_r_train_u, user_ptrs_train,
-    all_m_rev_train, all_u_rev_train, all_r_train_m, item_ptrs_train,
-    all_u_test, all_m_test, all_r_test, user_ptrs_test,
-    num_epochs=20, lam=0.1, gamma=0.1, tau=0.1,
-    embeddings_dim=20, scale=0.1
-):
+def training(num_users, num_items,
+            all_m_train, all_r_train_u, user_ptrs_train,
+            all_u_rev_train, all_r_train_m, item_ptrs_train,
+            all_m_test, all_r_test, user_ptrs_test,
+            num_epochs=20, lam=0.1, gamma=0.1, tau=0.1,
+            embeddings_dim=20, scale=0.1):
     """
-    Optimized ALS training using preprocessed data.
+    Optimised ALS training using preprocessed data.
+
+    Parameters:
+    - num_users (int): Number of users.
+    - num_items (int): Number of items.
+    - all_m_train (np.ndarray[int]): Array of movie indices rated by users in training
+    - all_r_train_u (np.ndarray[float]): Array of ratings given by users in training.
+    - user_ptrs_train (np.ndarray[int]): Pointer array for training user ratings.
+    - all_u_rev_train (np.ndarray[int]): Array of user indices who rated items in training.
+    - all_r_train_m (np.ndarray[float]): Array of ratings given by users to items in training.
+    - item_ptrs_train (np.ndarray[int]): Pointer array for training item ratings.
+    - all_m_test (np.ndarray[int]): Array of movie indices rated by users in testing.
+    - all_r_test (np.ndarray[float]): Array of ratings given by users in testing.
+    - user_ptrs_test (np.ndarray[int]): Pointer array for testing user ratings.
+    - num_epochs (int): Number of epochs to train.
+    - lam (float): Regularization parameter for reward difference.
+    - gamma (float): Regularization parameter for biases.
+    - tau (float): Regularization parameter for embeddings.
+    - embeddings_dim (int): Dimensionality of the embeddings.
+    - scale (float): Scale for initial random embeddings.
+
+    Returns:
+    - training_loss (list): List of training loss values for each epoch.
+    - training_RMSE (list): List of training RMSE values for each epoch.
+    - testing_RMSE (list): List of testing RMSE values for each epoch.
+    - embeddings (list): List containing user and item embeddings.
+    - biases (list): List containing user and item biases.
     """
-    print("Starting ALS optimization (preprocessed)...")
+    print("Starting training")
     start_time = time.time()
 
     user_embeddings = np.random.normal(0, scale, (num_users, embeddings_dim)).astype(np.float64)
@@ -140,18 +199,17 @@ def training_als_from_preprocessed(
                                user_biases, item_biases,
                                lam, gamma, tau_identity)
 
-        train_rmse = calculate_rmse_jit(user_ptrs_train, all_u_train, all_m_train, all_r_train_u,
+        train_rmse = calculate_rmse(user_ptrs_train, all_m_train, all_r_train_u,
                                         user_embeddings, item_embeddings,
                                         user_biases, item_biases)
 
-        test_rmse = calculate_rmse_jit(user_ptrs_test, all_u_test, all_m_test, all_r_test,
+        test_rmse = calculate_rmse(user_ptrs_test, all_m_test, all_r_test,
                                        user_embeddings, item_embeddings,
                                        user_biases, item_biases)
 
         squared_user_bias = np.sum(user_biases**2)
         squared_item_bias = np.sum(item_biases**2)
 
-        # Frobenius norms of embedding matrices
         embedding_user_norm = np.sum(user_embeddings * user_embeddings)
         embedding_item_norm = np.sum(item_embeddings * item_embeddings)
 
